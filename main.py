@@ -6,16 +6,48 @@ import io
 import requests
 from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="車両画像チェックツール", layout="centered")
+# --- ページ設定 ---
+st.set_page_config(page_title="車両画像チェックツール", layout="centered", page_icon="🚗")
 
+# --- カスタムCSS（シンプルなデザインにするための微調整） ---
+st.markdown("""
+<style>
+    /* 見出しの色と太さを調整 */
+    h3 {
+        color: #333333;
+        font-weight: 600;
+        margin-top: 1.5rem;
+    }
+    /* 区切り線を薄く控えめに */
+    hr {
+        margin-top: 2rem;
+        margin-bottom: 2rem;
+        border-color: #f0f2f6;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- タイトルエリア ---
 st.title("🚗 車両画像チェックツール")
-st.write("カーセンサーの掲載ページURLとローカルの画像を比較し、未掲載の画像をZIPでダウンロードします。")
+st.markdown("カーセンサーの掲載ページURLとローカルの画像を比較し、未掲載の画像のみを抽出します。")
+st.markdown("---")
 
-st.success("### ①カーセンサーの物件ページURL")
-page_url = st.text_input("URLを貼り付けてください", placeholder="例: https://www.carsensor.net/usedcar/detail/...")
+# --- ① URL入力 ---
+st.markdown("### ① カーセンサーの物件ページURL")
+page_url = st.text_input("URL", label_visibility="collapsed", placeholder="例: https://www.carsensor.net/usedcar/detail/...")
 
-st.success("### ②ローカルファイル")
-local_files = st.file_uploader("ローカルの車両画像（ZIPファイル、または複数画像）", type=['zip', 'jpg', 'jpeg', 'png'], accept_multiple_files=True)
+# --- ② ファイルアップロード ---
+st.markdown("### ② ローカルファイル")
+st.caption("比較したい車両画像をアップロードしてください（複数選択・ZIPファイル対応）")
+local_files = st.file_uploader("ファイルを選択", label_visibility="collapsed", type=['zip', 'jpg', 'jpeg', 'png'], accept_multiple_files=True)
+
+# --- 画像処理の関数群（前回の高精度版のまま） ---
+def resize_image(img, max_width=600):
+    h, w = img.shape[:2]
+    if w > max_width:
+        ratio = max_width / w
+        return cv2.resize(img, (max_width, int(h * ratio)))
+    return img
 
 def get_images_from_url(url):
     try:
@@ -39,6 +71,7 @@ def get_images_from_url(url):
                 nparr = np.frombuffer(res.content, np.uint8)
                 img_gray = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
                 if img_gray is not None:
+                    img_gray = resize_image(img_gray)
                     web_gray_images.append(img_gray)
             except Exception:
                 continue
@@ -48,15 +81,15 @@ def get_images_from_url(url):
         return None
 
 def process_images(web_images, local_file_objs):
-    orb = cv2.ORB_create()
+    akaze = cv2.AKAZE_create()
     
     web_des_list = []
     for img in web_images:
-        _, des = orb.detectAndCompute(img, None)
+        _, des = akaze.detectAndCompute(img, None)
         if des is not None:
             web_des_list.append(des)
             
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
     missing_images = []
     image_data_list = []
     
@@ -82,17 +115,31 @@ def process_images(web_images, local_file_objs):
 
         if local_gray is None:
             continue
-
-        _, des_local = orb.detectAndCompute(local_gray, None)
+            
+        local_gray = resize_image(local_gray)
+        _, des_local = akaze.detectAndCompute(local_gray, None)
         
         is_found = False
-        if des_local is not None:
+        if des_local is not None and len(des_local) > 2:
             for des_web in web_des_list:
-                matches = bf.match(des_local, des_web)
-                good_matches = [m for m in matches if m.distance < 50]
-                if len(good_matches) >= 30: 
-                    is_found = True
-                    break
+                if des_web is None or len(des_web) < 2:
+                    continue
+                    
+                try:
+                    matches = bf.knnMatch(des_local, des_web, k=2)
+                    
+                    good_matches = []
+                    for match_pair in matches:
+                        if len(match_pair) == 2:
+                            m, n = match_pair
+                            if m.distance < 0.75 * n.distance:
+                                good_matches.append(m)
+                                
+                    if len(good_matches) >= 15: 
+                        is_found = True
+                        break
+                except Exception:
+                    continue
         
         if not is_found:
             missing_images.append((file_name, file_bytes))
@@ -101,21 +148,26 @@ def process_images(web_images, local_file_objs):
 
     return missing_images
 
+# --- ③ 画像の比較を開始する ---
 st.markdown("---")
-st.error("### ③掲載のない画像のダウンロード")
+st.markdown("### ③ 画像の比較を開始する")
 
 if page_url and local_files:
-    if st.button("画像の比較を開始する", use_container_width=True):
-        with st.spinner("掲載ページから画像を取得し、比較しています..."):
+    if st.button("✨ 比較を実行する", use_container_width=True, type="primary"):
+        with st.spinner("掲載ページから画像を取得し、比較しています...（少し時間がかかります）"):
             web_images = get_images_from_url(page_url)
             
             if web_images:
                 missing_list = process_images(web_images, local_files)
                 
+                # --- ④ 掲載のない画像のダウンロード（処理が終わったら表示） ---
+                st.markdown("---")
+                st.markdown("### ④ 掲載のない画像のダウンロード")
+                
                 if missing_list is None:
                     st.error("比較できるローカル画像が見つかりませんでした。")
                 elif missing_list:
-                    st.info(f"掲載されていない画像が {len(missing_list)} 枚見つかりました！")
+                    st.info(f"未掲載の画像が **{len(missing_list)}** 枚見つかりました。")
                     
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -124,14 +176,13 @@ if page_url and local_files:
                             zip_file.writestr(safe_name, file_bytes)
                     
                     st.download_button(
-                        label="📥 未掲載画像をZIPでダウンロード",
+                        label="📥 ZIPファイルでダウンロード",
                         data=zip_buffer.getvalue(),
                         file_name="missing_images.zip",
                         mime="application/zip",
-                        type="primary",
                         use_container_width=True
                     )
                 else:
-                    st.success("すべてのローカル画像が掲載ページに存在します！")
+                    st.success("🎉 すべてのローカル画像が掲載ページに存在します！")
 else:
-    st.warning("URLの入力と画像のアップロードが完了すると、ボタンが表示されます。")
+    st.info("💡 ①と②のデータをセットすると、比較ボタンが押せるようになります。")
